@@ -195,20 +195,30 @@ def extract_roster_entries(url: str):
     if not soup:
         return []
 
-    # sport name guess from breadcrumb or title
-    title_txt = (soup.title.string if soup.title else "") or ""
-    h1_txt = (soup.find("h1").get_text(" ", strip=True) if soup.find("h1") else "")
+    # Extract sport name from URL (cleaner than from page title)
+    # URL pattern: /sports/{sport}/roster/...
+    parsed_url = urlparse(url)
+    path_parts = [p for p in parsed_url.path.split("/") if p]
+    sport_slug = None
     sport_guess = ""
-    for t in [h1_txt, title_txt]:
-        if "roster" in (t or "").lower():
-            sport_guess = t
-            break
+    if "sports" in path_parts:
+        sport_index = path_parts.index("sports")
+        if sport_index + 1 < len(path_parts):
+            # Get the sport name and format it nicely
+            sport_slug = path_parts[sport_index + 1]
+            # Convert slug to readable name (e.g., "field-hockey" -> "Field Hockey")
+            sport_guess = " ".join(word.capitalize() for word in sport_slug.split("-"))
+    
+    # Fallback to URL segment if extraction failed
     if not sport_guess:
-        # fallback to URL segment
-        sport_guess = "/".join(urlparse(url).path.split("/")[:3])
+        sport_guess = "/".join(path_parts[:3]) if len(path_parts) >= 3 else "Unknown Sport"
 
     # Extract year from URL
     year_guess = extract_year_from_url(url)
+
+    # Determine category and season based on sport slug
+    sport_category = SPORT_CATEGORIES.get(sport_slug, "Both-genders")
+    sport_season = SPORT_SEASONS.get(sport_slug, "unknown")
 
     # Attempt to extract player names from JSON script tag
     rows = []
@@ -243,6 +253,37 @@ def extract_roster_entries(url: str):
                     return None
                 string_table = find_array_in_dict(json_data)
             
+            # Build a mapping of class_level_id to class level names
+            # Search through the JSON for objects with id/name that represent class levels
+            class_level_map = {}
+            def build_class_level_map(obj, st, depth=0, max_depth=15):
+                if depth > max_depth:
+                    return
+                if isinstance(obj, dict):
+                    obj_id = obj.get('id')
+                    name_val = obj.get('name')
+                    
+                    # Resolve name
+                    if st and isinstance(name_val, int) and 0 <= name_val < len(st):
+                        name_resolved = st[name_val]
+                    else:
+                        name_resolved = name_val
+                    
+                    # Check if name looks like a class year
+                    if isinstance(name_resolved, str) and obj_id is not None:
+                        name_lower = name_resolved.lower()
+                        if any(term in name_lower for term in ['freshman', 'sophomore', 'junior', 'senior', 'graduate', 'redshirt']):
+                            class_level_map[obj_id] = name_resolved
+                    
+                    # Recurse
+                    for v in obj.values():
+                        build_class_level_map(v, st, depth+1, max_depth)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        build_class_level_map(item, st, depth+1, max_depth)
+            
+            build_class_level_map(json_data, string_table)
+            
             def resolve_string(value, string_table_ref):
                 """Resolve a value - if it's an integer, use it as an index into the string table"""
                 if isinstance(value, int) and string_table_ref and 0 <= value < len(string_table_ref):
@@ -257,13 +298,206 @@ def extract_roster_entries(url: str):
                 else:
                     return str(value) if value is not None else ""
             
+            # Helper function to extract class year from biography text
+            def extract_class_year_from_biography(bio_text, roster_year):
+                """Extract current class year from biography by finding the most recent season entry"""
+                if not bio_text or not isinstance(bio_text, str):
+                    return ""
+                
+                # Look for patterns like "As a Junior (2024)" or "As a Sophomore (2023)"
+                # Find all "As a [Class] (YEAR)" patterns
+                pattern = r'As a\s+([A-Za-z\s]+?)\s*\((\d{4})'
+                matches = re.findall(pattern, bio_text, re.IGNORECASE)
+                
+                if matches:
+                    # Sort by year (most recent first)
+                    year_class_pairs = [(int(year), class_name.strip()) for class_name, year in matches if year.isdigit()]
+                    if year_class_pairs:
+                        year_class_pairs.sort(reverse=True)  # Most recent first
+                        # Get the most recent entry
+                        latest_year, latest_class = year_class_pairs[0]
+                        
+                        # Calculate years since that entry
+                        years_since = roster_year - latest_year
+                        
+                        # Map class progression
+                        class_progression = {
+                            "freshman": 1, "fr": 1,
+                            "sophomore": 2, "so": 2,
+                            "junior": 3, "jr": 3,
+                            "senior": 4, "sr": 4,
+                            "graduate": 5, "grad": 5, "gr": 5,
+                            "5th year": 5, "fifth year": 5
+                        }
+                        
+                        latest_class_lower = latest_class.lower()
+                        current_level = None
+                        for key, level in class_progression.items():
+                            if key in latest_class_lower:
+                                current_level = level + years_since
+                                break
+                        
+                        if current_level:
+                            if current_level >= 5:
+                                # Check if it's explicitly "5th year" or "Graduate"
+                                if "graduate" in latest_class_lower or "grad" in latest_class_lower:
+                                    return "Graduate"
+                                else:
+                                    return "5th Year"
+                            elif current_level == 4:
+                                return "Senior"
+                            elif current_level == 3:
+                                return "Junior"
+                            elif current_level == 2:
+                                return "Sophomore"
+                            elif current_level == 1:
+                                return "Freshman"
+                
+                # Fallback: look for headings like "As a Redshirt Sophomore" without a year
+                heading_pattern = r"As a\s+([A-Za-z\s'-]+)"
+                headings = re.findall(heading_pattern, bio_text, re.IGNORECASE)
+                if headings:
+                    first_heading = headings[0].strip()
+                    if first_heading:
+                        return first_heading
+                
+                # Fallback: look for explicit "5th year" or "Fifth year" mentions
+                if re.search(r'\b(5th year|fifth year)\b', bio_text, re.IGNORECASE):
+                    return "5th Year"
+                
+                return ""
+            
             # Now search for player data (dicts with first_name and last_name keys)
-            def find_player_data_simple(data, string_table_ref=None):
+            def find_player_data_simple(data, string_table_ref=None, class_level_map_ref=None, roster_year=None, debug=False):
                 if isinstance(data, dict):
                     if "first_name" in data and "last_name" in data:
+                        # Check if this is a coach/staff member
+                        type_val = data.get("type")
+                        if string_table_ref and isinstance(type_val, int) and 0 <= type_val < len(string_table_ref):
+                            type_resolved = string_table_ref[type_val]
+                        else:
+                            type_resolved = type_val
+                        
+                        staff_member = data.get("staff_member")
+                        has_staff_member = staff_member is not None and staff_member != 12  # 12 is null placeholder
+                        
+                        # Determine if this is a coach/staff (not a player)
+                        is_coach_or_staff = False
+                        if type_resolved == "coach" or has_staff_member:
+                            is_coach_or_staff = True
+                        elif type_resolved and isinstance(type_resolved, str):
+                            type_lower = type_resolved.lower()
+                            if any(term in type_lower for term in ["coach", "assistant", "staff", "director", "manager"]):
+                                is_coach_or_staff = True
+                        
                         # Resolve the integer references to actual strings
                         first_name = resolve_string(data["first_name"], string_table_ref)
                         last_name = resolve_string(data["last_name"], string_table_ref)
+                        
+                        # Extract class/year information
+                        class_year = ""
+                        bio_text_plain = ""
+                        
+                        if is_coach_or_staff:
+                            # Mark as "Not a Player"
+                            class_year = "Not a Player"
+                        else:
+                            # FIRST: Try class_level_id field and look it up in the map
+                            if "class_level_id" in data and class_level_map_ref:
+                                class_level_id = data["class_level_id"]
+                                # Skip if class_level_id is 12 (null placeholder in Nuxt.js)
+                                if class_level_id is not None and class_level_id != 12 and class_level_id in class_level_map_ref:
+                                    class_year = class_level_map_ref[class_level_id]
+                            
+                            # SECOND: Check if player has no biography - if so, check for freshman indicators first
+                            # (This helps catch freshmen who don't have biographies yet)
+                            bio_text_raw = resolve_string(data.get("short_master_biography"), string_table_ref)
+                            bio_text = bio_text_raw if isinstance(bio_text_raw, str) else ""
+                            has_season_heading = bool(re.search(r"As a\s+[A-Za-z]", bio_text, re.IGNORECASE)) if bio_text else False
+                            previous_school = resolve_string(data.get("previous_school"), string_table_ref)
+                            high_school = resolve_string(data.get("high_school"), string_table_ref)
+                            
+                            # If no biography and no previous_school but has high_school,
+                            # they're likely a freshman (new player) - check this BEFORE trying to extract from bio
+                            if not class_year:
+                                if (not bio_text or len(bio_text.strip()) == 0) and \
+                                   (not previous_school or previous_school == "None" or len(str(previous_school).strip()) == 0) and \
+                                   high_school and len(str(high_school).strip()) > 0:
+                                    class_year = "Freshman"
+                            
+                            # THIRD: Try to extract from biography if we still don't have a class year
+                            if not class_year and roster_year and bio_text and len(bio_text.strip()) > 0:
+                                class_year = extract_class_year_from_biography(bio_text, roster_year)
+
+                            if bio_text:
+                                try:
+                                    bio_text_plain = BeautifulSoup(bio_text, "lxml").get_text(" ", strip=True)
+                                except Exception:
+                                    bio_text_plain = bio_text
+
+                            # Additional fallback: biography present but no class-year headings,
+                            # and looks like a new player profile (only "Prior to Stanford" content)
+                            if (not class_year and bio_text and "prior to stanford" in bio_text.lower()
+                                    and not has_season_heading):
+                                if (not previous_school or previous_school == "None" or len(str(previous_school).strip()) == 0):
+                                    class_year = "Freshman"
+                            
+                            # FOURTH: Try common field names if biography didn't work
+                            if not class_year:
+                                for field_name in ["class", "academic_year", "year_class", "eligibility_year", "eligibility_class", "year", "academic_class"]:
+                                    if field_name in data:
+                                        class_year_val = resolve_string(data[field_name], string_table_ref)
+                                        if class_year_val and isinstance(class_year_val, str) and class_year_val.strip():
+                                            class_year = class_year_val.strip()
+                                            break
+                            
+                            # FIFTH: Last resort - search only specific fields that might contain class/year info
+                            # (Removed the broad search of all fields as it was too error-prone)
+                            if not class_year:
+                                # Only check fields that are explicitly related to class/year
+                                specific_fields = ["class_level", "academic_class", "year_in_school"]
+                                for field_name in specific_fields:
+                                    if field_name in data:
+                                        val = resolve_string(data[field_name], string_table_ref)
+                                        if isinstance(val, str) and val.strip():
+                                            val_lower = val.lower().strip()
+                                            if any(term in val_lower for term in ["freshman", "sophomore", "junior", "senior", "graduate", "5th year", "fifth year"]):
+                                                class_year = val.strip()
+                                                break
+                        
+                        # Normalize class year values (skip if already "Not a Player")
+                        if class_year and class_year != "Not a Player":
+                            class_year_lower = class_year.lower().strip()
+                            # Handle "Redshirt" prefix
+                            if "redshirt" in class_year_lower:
+                                if "senior" in class_year_lower:
+                                    class_year = "Redshirt Senior"
+                                elif "junior" in class_year_lower:
+                                    class_year = "Redshirt Junior"
+                                elif "sophomore" in class_year_lower:
+                                    class_year = "Redshirt Sophomore"
+                                elif "freshman" in class_year_lower:
+                                    class_year = "Redshirt Freshman"
+                                else:
+                                    class_year = class_year.strip()
+                            # Map common variations to standard terms
+                            elif "freshman" in class_year_lower or "fr" in class_year_lower or class_year_lower == "1":
+                                class_year = "Freshman"
+                            elif "sophomore" in class_year_lower or "so" in class_year_lower or class_year_lower == "2":
+                                class_year = "Sophomore"
+                            elif "junior" in class_year_lower or "jr" in class_year_lower or class_year_lower == "3":
+                                class_year = "Junior"
+                            elif "senior" in class_year_lower or "sr" in class_year_lower or class_year_lower == "4":
+                                class_year = "Senior"
+                            elif "5th year" in class_year_lower or "fifth year" in class_year_lower:
+                                class_year = "5th Year"
+                            elif "graduate" in class_year_lower or "grad" in class_year_lower or "gr" in class_year_lower:
+                                class_year = "Graduate"
+                            else:
+                                # Keep original if it doesn't match common patterns, but capitalize properly
+                                class_year = class_year.strip()
+                                # Capitalize first letter of each word
+                                class_year = " ".join(word.capitalize() for word in class_year.split())
                         
                         # Only add if we got actual string names (contain letters, not just numbers)
                         if (first_name and last_name and 
@@ -279,16 +513,21 @@ def extract_roster_entries(url: str):
                                 "full_name": full_name,
                                 "first_name": first_name.strip(),
                                 "last_name": last_name.strip(),
+                                "bio_text": bio_text_plain,
+                                "sport_slug": sport_slug or "",
+                                "season": sport_season,
+                                "category": sport_category,
+                                "class_year": class_year,
                                 "last_name_norm": re.sub(r"[^a-z]", "", last_name.strip().lower())
                             })
                     # Recursively search through all values
                     for value in data.values():
-                        find_player_data_simple(value, string_table_ref)
+                        find_player_data_simple(value, string_table_ref, class_level_map_ref, roster_year, debug)
                 elif isinstance(data, list):
                     for item in data:
-                        find_player_data_simple(item, string_table_ref)
+                        find_player_data_simple(item, string_table_ref, class_level_map_ref, roster_year, debug)
 
-            find_player_data_simple(json_data, string_table)
+            find_player_data_simple(json_data, string_table, class_level_map, year_guess)
             
             # Remove duplicates based on source_url, first_name, and last_name
             seen_players = set()
@@ -307,7 +546,100 @@ def extract_roster_entries(url: str):
             import traceback
             traceback.print_exc()
 
-    # No fallback to heuristics in this simplified version
+    # Fallback: Extract class/year from HTML table if not found in JSON
+    # Create a mapping of player names to class/year from HTML table
+    if soup and rows:
+        name_to_class_year = {}
+        try:
+            # Look for roster tables - common patterns
+            tables = soup.find_all("table")
+            for table in tables:
+                # Try to find table headers to identify the class/year column
+                headers = []
+                header_row = table.find("thead")
+                if header_row:
+                    headers = [th.get_text(strip=True).lower() for th in header_row.find_all(["th", "td"])]
+                else:
+                    # Check first row as headers
+                    first_row = table.find("tr")
+                    if first_row:
+                        headers = [th.get_text(strip=True).lower() for th in first_row.find_all(["th", "td"])]
+                
+                # Find the index of class/year column
+                class_col_idx = None
+                for idx, header in enumerate(headers):
+                    if any(term in header for term in ["class", "year", "eligibility", "academic"]):
+                        class_col_idx = idx
+                        break
+                
+                # Also look for name column
+                name_col_idx = None
+                for idx, header in enumerate(headers):
+                    if any(term in header for term in ["name", "player"]):
+                        name_col_idx = idx
+                        break
+                
+                # If we found both columns, extract data
+                if class_col_idx is not None:
+                    rows_data = table.find_all("tr")[1:] if header_row else table.find_all("tr")
+                    for row in rows_data:
+                        cells = row.find_all(["td", "th"])
+                        if len(cells) > max(class_col_idx, name_col_idx if name_col_idx else 0):
+                            if name_col_idx is not None:
+                                name_cell = cells[name_col_idx].get_text(strip=True)
+                            else:
+                                # Assume first column is name if not specified
+                                name_cell = cells[0].get_text(strip=True)
+                            
+                            class_cell = cells[class_col_idx].get_text(strip=True)
+                            
+                            # Clean name and class year
+                            name_clean = clean_name(name_cell)
+                            if name_clean and class_cell:
+                                name_to_class_year[name_clean.lower()] = class_cell
+        except Exception as e:
+            print(f"Error parsing HTML table for class/year: {e}")
+        
+        # Match class/year to players extracted from JSON
+        if name_to_class_year:
+            for row in rows:
+                # Try matching by full name
+                full_name_lower = row["full_name"].lower()
+                if full_name_lower in name_to_class_year:
+                    class_year_val = name_to_class_year[full_name_lower]
+                    # Normalize the class year
+                    class_year_lower = class_year_val.lower()
+                    if "freshman" in class_year_lower or "fr" in class_year_lower or class_year_lower == "1":
+                        row["class_year"] = "Freshman"
+                    elif "sophomore" in class_year_lower or "so" in class_year_lower or class_year_lower == "2":
+                        row["class_year"] = "Sophomore"
+                    elif "junior" in class_year_lower or "jr" in class_year_lower or class_year_lower == "3":
+                        row["class_year"] = "Junior"
+                    elif "senior" in class_year_lower or "sr" in class_year_lower or class_year_lower == "4":
+                        row["class_year"] = "Senior"
+                    elif "graduate" in class_year_lower or "grad" in class_year_lower or "gr" in class_year_lower:
+                        row["class_year"] = "Graduate"
+                    else:
+                        row["class_year"] = class_year_val.strip()
+                else:
+                    # Try matching by first and last name separately
+                    first_last_key = f"{row['first_name'].lower()} {row['last_name'].lower()}"
+                    if first_last_key in name_to_class_year:
+                        class_year_val = name_to_class_year[first_last_key]
+                        class_year_lower = class_year_val.lower()
+                        if "freshman" in class_year_lower or "fr" in class_year_lower or class_year_lower == "1":
+                            row["class_year"] = "Freshman"
+                        elif "sophomore" in class_year_lower or "so" in class_year_lower or class_year_lower == "2":
+                            row["class_year"] = "Sophomore"
+                        elif "junior" in class_year_lower or "jr" in class_year_lower or class_year_lower == "3":
+                            row["class_year"] = "Junior"
+                        elif "senior" in class_year_lower or "sr" in class_year_lower or class_year_lower == "4":
+                            row["class_year"] = "Senior"
+                        elif "graduate" in class_year_lower or "grad" in class_year_lower or "gr" in class_year_lower:
+                            row["class_year"] = "Graduate"
+                        else:
+                            row["class_year"] = class_year_val.strip()
+
     return rows
 
 # OPTIONAL: Discovery crawl (commented out - using direct URL generation instead)
@@ -318,9 +650,32 @@ def extract_roster_entries(url: str):
 # for u in discovered_roster_pages[:8]:
 #     print(" -", u)
 
+# Map sports to categories (update as new sports are added)
+# Valid values: "Women's Sports", "Men's Sports", "Both-genders"
+SPORT_CATEGORIES: dict[str, str] = {
+    "field-hockey": "Women's Sports",
+    "mens-soccer": "Men's Sports",
+    "track-field": "Both-genders",
+    "womens-soccer": "Women's Sports",
+    "cross-country": "Both-genders",
+    "baseball": "Men's Sports",
+}
+
+SPORT_SEASONS: dict[str, str] = {
+    "field-hockey": "fall",
+    "mens-soccer": "fall",
+    "track-field": "winter",
+    "womens-soccer": "fall",
+    "cross-country": "fall",
+    "baseball": "spring",
+}
+
 # FALL SPORTS - their season is this year (e.g. now is 2025)
 sport_names_fall = [
     "field-hockey",
+    "womens-soccer",
+    "cross-country",
+    "mens-soccer",
     #"volleyball"
 ]
 
@@ -342,6 +697,7 @@ print(f"TOTAl = {len(all_roster_urls)} so far")
 
 # WINTER SPORTS - their season is between years (e.g. rn is 2025-26)
 sport_names_winter = [
+    "track-field",
     #"womens-basketball"
 ]
 
@@ -350,8 +706,15 @@ winter_roster_urls = []
 for sport in sport_names_winter:
   specific_sport_roster_urls = []
   for year in YEARS:
-      specific_sport_roster_urls.append(urljoin(BASE, f"/sports/{sport}/roster/{year}-{str(year+1)[2:]}"))
-      winter_roster_urls.append(urljoin(BASE, f"/sports/{sport}/roster/{year}-{str(year+1)[2:]}"))
+      url_candidates = {
+          urljoin(BASE, f"/sports/{sport}/roster/{year}-{str(year+1)[2:]}"),
+          urljoin(BASE, f"/sports/{sport}/roster/season/{year+1}"),
+      }
+      for candidate in url_candidates:
+          if candidate not in specific_sport_roster_urls:
+              specific_sport_roster_urls.append(candidate)
+          if candidate not in winter_roster_urls:
+              winter_roster_urls.append(candidate)
   print(f"{sport} - WINTER - generated {len(specific_sport_roster_urls)} potential roster URLs.")
   print(f"Showing All for {sport}")
   for u in specific_sport_roster_urls[:23]:
@@ -363,6 +726,7 @@ print(f"TOTAl = {len(all_roster_urls)} so far")
 
 #SPRING SPORTS - their season is the year after (e.g. rn is 2026)
 sport_names_spring = [
+    "baseball",
     #"artistic-swimming"
 ]
 
@@ -398,6 +762,10 @@ for i, url in enumerate(roster_pages, start=1):
     except Exception as e:
         print(f"  Parse error: {e}")
 
+# Output filenames for current academic year
+ROSTER_OUTPUT_FILENAME = "25-26 Rosters.csv"
+SAME_LAST_NAME_FILENAME = "25-26 Same.csv"
+
 # Create DataFrame and display results
 df = pd.DataFrame(all_rows)
 print(f"\n{'='*60}")
@@ -405,10 +773,247 @@ print(f"Total rows extracted: {len(df)}")
 print(f"{'='*60}")
 
 if len(df) > 0:
-    print("\nFirst 10 rows:")
-    print(df.head(10).to_string())
-    print(f"\nDataFrame shape: {df.shape}")
-    print(f"Columns: {list(df.columns)}")
+    if "bio_text" not in df.columns:
+        df["bio_text"] = ""
+    df["has_twin"] = df["bio_text"].fillna("").str.contains(r"\btwin\b", case=False)
+    if "sport_slug" not in df.columns:
+        df["sport_slug"] = ""
+    if "season" not in df.columns:
+        df["season"] = "unknown"
+
+    def academic_details(row):
+        year_val = row.get("year")
+        season_label = (row.get("season") or "unknown").lower()
+        try:
+            year_int = int(year_val)
+        except (TypeError, ValueError):
+            return pd.Series({"academic_year": "Unknown", "season_label": "Unknown"})
+
+        if season_label == "fall":
+            base_year = year_int
+            season_name = "Fall"
+        elif season_label == "winter":
+            base_year = year_int - 1
+            season_name = "Winter"
+        elif season_label == "spring":
+            base_year = year_int - 1
+            season_name = "Spring"
+        else:
+            base_year = year_int
+            season_name = "Unknown"
+
+        academic_year = f"{base_year}-{str((base_year + 1) % 100).zfill(2)}"
+        return pd.Series({"academic_year": academic_year, "season_label": season_name})
+
+    academic_df = df.apply(academic_details, axis=1)
+    df = pd.concat([df, academic_df], axis=1)
+
+    # Create a DataFrame with only the requested columns
+    output_columns = [
+        "category",
+        "sport",
+        "season_label",
+        "academic_year",
+        "year",
+        "first_name",
+        "last_name",
+        "class_year",
+        "has_twin",
+    ]
+    for col in output_columns:
+        if col not in df.columns:
+            df[col] = ""
+
+    df_output = df[output_columns].copy()
+    category_order = {"Women's Sports": 0, "Both-genders": 1, "Men's Sports": 2}
+    df_output["_category_rank"] = df_output["category"].map(category_order).fillna(3)
+    df_output["_sport_key"] = df_output["sport"].str.lower()
+    df_output = df_output.sort_values(["_category_rank", "_sport_key"])
+    df_output = df_output.drop(columns=["_category_rank", "_sport_key"])
+    
+    # Save to CSV
+    total_athletes = len(df_output[df_output["class_year"].fillna("").str.lower() != "not a player"])
+    summary_row = pd.DataFrame([{
+        "category": "Summary",
+        "sport": "",
+        "season_label": "",
+        "academic_year": "",
+        "year": "",
+        "first_name": "",
+        "last_name": "",
+        "class_year": f"Total athletes: {total_athletes}",
+        "has_twin": "",
+    }])
+    df_output_with_total = pd.concat([df_output, summary_row], ignore_index=True)
+
+    csv_filename = ROSTER_OUTPUT_FILENAME
+    df_output_with_total.to_csv(csv_filename, index=False)
+    print(f"\n✅ Data saved to {csv_filename}")
+    print(f"👟 Total athletes (excl. staff/not a player): {total_athletes}")
+
+    # Identify players (exclude staff/coaches) who share the same last name
+    players_only = df_output[df_output["class_year"].fillna("").str.lower() != "not a player"].copy()
+    players_only = players_only.assign(note="")
+    players_only.loc[players_only["has_twin"], "note"] = "Twin mentioned in bio"
+
+    same_last_name_filename = SAME_LAST_NAME_FILENAME
+
+    group_cols = ["sport", "academic_year", "last_name"]
+    grouped = players_only.groupby(group_cols, dropna=False)
+
+    duplicate_rows = grouped.filter(lambda g: len(g) > 1)
+    twin_rows = players_only[players_only["has_twin"]]
+
+    def is_sibling_group(group):
+        relevant = group[group["class_year"].notna() & (group["class_year"].str.strip() != "")]
+        if len(relevant) <= 1:
+            return False
+        return relevant["class_year"].str.strip().str.lower().nunique() > 1
+
+    sibling_rows = grouped.filter(is_sibling_group)
+
+    subset_cols = [
+        "category",
+        "sport",
+        "academic_year",
+        "season_label",
+        "year",
+        "first_name",
+        "last_name",
+        "class_year",
+        "has_twin",
+        "note",
+    ]
+
+    parts = []
+    if not duplicate_rows.empty:
+        parts.append(duplicate_rows[subset_cols])
+    if not twin_rows.empty:
+        parts.append(twin_rows[subset_cols])
+    if not sibling_rows.empty:
+        parts.append(sibling_rows[subset_cols])
+
+    if parts:
+        same_last_name_df = pd.concat(parts, ignore_index=True)
+        same_last_name_df = same_last_name_df.drop_duplicates(
+            subset=["category", "sport", "academic_year", "season_label", "year", "first_name", "last_name"],
+            keep="first"
+        )
+        same_last_name_df["_category_rank"] = same_last_name_df["category"].map(category_order).fillna(3)
+        same_last_name_df["_sport_key"] = same_last_name_df["sport"].str.lower()
+        same_last_name_df = same_last_name_df.sort_values(
+            ["_category_rank", "_sport_key", "academic_year", "season_label", "last_name", "first_name"]
+        ).drop(columns=["_category_rank", "_sport_key"])
+        same_last_name_df = same_last_name_df.drop_duplicates(
+            subset=["academic_year", "first_name", "last_name"],
+            keep="first"
+        )
+        season_order_map = {"Fall": 0, "Winter": 1, "Spring": 2, "Unknown": 3}
+
+        def academic_base(val):
+            try:
+                return int(str(val).split("-")[0])
+            except (ValueError, AttributeError):
+                return 9999
+
+        same_last_name_df = same_last_name_df.assign(
+            _academic_rank=same_last_name_df["academic_year"].apply(academic_base),
+            _season_rank=same_last_name_df["season_label"].map(season_order_map).fillna(3)
+        ).sort_values(
+            ["_academic_rank", "_season_rank", "last_name", "first_name", "sport", "year"]
+        ).drop(columns=["_academic_rank", "_season_rank"])
+
+        # Calculate summary counts by category and year
+        summary_records = []
+        summary_categories = ["Men's Sports", "Women's Sports", "Both-genders"]
+        academic_years = sorted(same_last_name_df["academic_year"].unique(), key=academic_base)
+
+        for academic_year in academic_years:
+            year_group = same_last_name_df[same_last_name_df["academic_year"] == academic_year]
+            for cat in summary_categories:
+                cat_group = year_group[year_group["category"] == cat]
+                twin_count = len(cat_group[cat_group["has_twin"]])
+                sibling_count = len(cat_group[~cat_group["has_twin"]])
+
+                summary_records.append({
+                    "category": "Summary",
+                    "sport": cat,
+                    "academic_year": academic_year,
+                    "season_label": "",
+                    "year": "Twin Count",
+                    "first_name": "",
+                    "last_name": "",
+                    "class_year": f"Count: {twin_count}",
+                    "has_twin": "",
+                    "note": "",
+                })
+                summary_records.append({
+                    "category": "Summary",
+                    "sport": cat,
+                    "academic_year": academic_year,
+                    "season_label": "",
+                    "year": "Sibling Count",
+                    "first_name": "",
+                    "last_name": "",
+                    "class_year": f"Count: {sibling_count}",
+                    "has_twin": "",
+                    "note": "",
+                })
+
+            total_twin = len(year_group[year_group["has_twin"]])
+            total_sibling = len(year_group[~year_group["has_twin"]])
+
+            summary_records.append({
+                "category": "Summary",
+                "sport": "All Sports",
+                "academic_year": academic_year,
+                "season_label": "",
+                "year": "Twin Count",
+                "first_name": "",
+                "last_name": "",
+                "class_year": f"Count: {total_twin}",
+                "has_twin": "",
+                "note": "",
+            })
+            summary_records.append({
+                "category": "Summary",
+                "sport": "All Sports",
+                "academic_year": academic_year,
+                "season_label": "",
+                "year": "Sibling Count",
+                "first_name": "",
+                "last_name": "",
+                "class_year": f"Count: {total_sibling}",
+                "has_twin": "",
+                "note": "",
+            })
+        summary_df = pd.DataFrame(summary_records)
+        if "has_twin" in summary_df.columns:
+            summary_df["has_twin"] = ""
+        combined_df = pd.concat([same_last_name_df, summary_df], ignore_index=True)
+        combined_df.to_csv(same_last_name_filename, index=False)
+        print(f"📁 Saved players with matching last names to {same_last_name_filename} (rows: {len(combined_df)})")
+    else:
+        # Create an empty file with headers if no duplicates found
+        empty_df = pd.DataFrame(columns=[
+            "category",
+            "sport",
+            "academic_year",
+            "season_label",
+            "year",
+            "first_name",
+            "last_name",
+            "class_year",
+            "has_twin",
+            "note",
+        ])
+        empty_df.to_csv(same_last_name_filename, index=False)
+        print("ℹ️ No players share the same last name.")
+
+    print(f"\nFirst 10 rows:")
+    print(df_output.head(10).to_string())
+    print(f"\nDataFrame shape: {df_output.shape}")
+    print(f"Columns: {list(df_output.columns)}")
 else:
     print("\nNo data extracted. Check URLs and JSON structure.")
 

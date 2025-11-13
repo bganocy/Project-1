@@ -1,0 +1,24 @@
+category,sport,academic_year,season_label,year,first_name,last_name,class_year,has_twin,note
+Men's Sports,Mens Soccer,2025-26,Fall,2025,Fletcher,Bank,Senior,True,Twin mentioned in bio
+Men's Sports,Mens Soccer,2025-26,Fall,2025,Palmer,Bank,Junior,True,Twin mentioned in bio
+Women's Sports,Field Hockey,2025-26,Fall,2025,Bella,Ganocy,Senior,True,Twin mentioned in bio
+Women's Sports,Field Hockey,2025-26,Fall,2025,Ella,Ganocy,Senior,True,Twin mentioned in bio
+Both-genders,Cross Country,2025-26,Fall,2025,Callum,Sherry,Senior,True,Twin mentioned in bio
+Both-genders,Cross Country,2025-26,Fall,2025,Gavin,Sherry,Senior,True,Twin mentioned in bio
+Women's Sports,Womens Soccer,2025-26,Fall,2025,Logan,Smith,Senior,False,
+Women's Sports,Womens Soccer,2025-26,Fall,2025,Sammy,Smith,Sophomore,False,
+Both-genders,Cross Country,2025-26,Fall,2025,Nolan,Topper,5th Year,True,Twin mentioned in bio
+Both-genders,Cross Country,2025-26,Fall,2025,Leo,Young,Junior,True,Twin mentioned in bio
+Both-genders,Cross Country,2025-26,Fall,2025,Lex,Young,Junior,True,Twin mentioned in bio
+Both-genders,Track Field,2025-26,Winter,2026,Sydney,Barta,Senior,True,Twin mentioned in bio
+Both-genders,Track Field,2025-26,Winter,2026,Irene,Riggs,Senior,True,Twin mentioned in bio
+Men's Sports,Baseball,2025-26,Spring,2026,Quinten,Marsh,Senior,False,
+Men's Sports,Baseball,2025-26,Spring,2026,Tatum,Marsh,Sophomore,False,
+Summary,Men's Sports,2025-26,,Twin Count,,,Count: 2,,
+Summary,Men's Sports,2025-26,,Sibling Count,,,Count: 2,,
+Summary,Women's Sports,2025-26,,Twin Count,,,Count: 2,,
+Summary,Women's Sports,2025-26,,Sibling Count,,,Count: 2,,
+Summary,Both-genders,2025-26,,Twin Count,,,Count: 7,,
+Summary,Both-genders,2025-26,,Sibling Count,,,Count: 0,,
+Summary,All Sports,2025-26,,Twin Count,,,Count: 11,,
+Summary,All Sports,2025-26,,Sibling Count,,,Count: 4,,
