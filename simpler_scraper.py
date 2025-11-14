@@ -323,11 +323,12 @@ def extract_roster_entries(url: str):
                         # Map class progression
                         class_progression = {
                             "freshman": 1, "fr": 1,
-                            "sophomore": 2, "so": 2,
-                            "junior": 3, "jr": 3,
-                            "senior": 4, "sr": 4,
+                            "sophomore": 2, "so": 2, "redshirt freshman": 2,
+                            "junior": 3, "jr": 3, "redshirt sophomore": 3,
+                            "senior": 4, "sr": 4, "redshirt junior": 4,
                             "graduate": 5, "grad": 5, "gr": 5,
-                            "5th year": 5, "fifth year": 5
+                            "5th year": 5, "fifth year": 5, "redshirt senior": 5,
+                            "6th year": 6, "sixth year": 6, "redshirt senior": 6,
                         }
                         
                         latest_class_lower = latest_class.lower()
@@ -841,6 +842,7 @@ if len(df) > 0:
         "year": "",
         "first_name": "",
         "last_name": "",
+
         "class_year": f"Total athletes: {total_athletes}",
         "has_twin": "",
     }])
